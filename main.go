@@ -29,6 +29,7 @@ import (
 	"path/filepath"
 	"runtime"
 	"runtime/debug"
+	"sort"
 	"strings"
 	"sync"
 	"time"
@@ -72,11 +73,20 @@ func (rcvr *Receiver) NewReceiver(ctx context.Context) {
 		msgType["r900"] = true
 	}
 
-	// For each given msgType, register it with the decoder.
+	// For each given msgType, register it with the decoder. Sort the names
+	// first so registration order (and the resulting radio configuration) is
+	// deterministic between runs.
+	msgTypes := make([]string, 0, len(msgType))
 	for name := range msgType {
+		msgTypes = append(msgTypes, name)
+	}
+	sort.Strings(msgTypes)
+
+	for _, name := range msgTypes {
 		p, err := protocol.NewParser(name, *symbolLength)
 		if err != nil {
 			slog.Error("message type", "error", err)
+			os.Exit(1)
 		}
 
 		rcvr.d.RegisterProtocol(p)
@@ -85,9 +95,17 @@ func (rcvr *Receiver) NewReceiver(ctx context.Context) {
 	// Allocate the internal buffers of the decoder.
 	rcvr.d.Allocate()
 
-	// Connect to rtl_tcp server.
-	if err := rcvr.Connect(); err != nil {
+	// Connect to rtl_tcp server. A nil address connects to the address given
+	// by the -server flag.
+	if err := rcvr.Connect(nil); err != nil {
 		rcvr.canc(fmt.Errorf("rcvr.Connect: %w", err))
+		return
+	}
+
+	// Handle rtl_tcp tuner flags (gain, frequency correction, etc.) now that
+	// we're connected. Calling this before connecting silently drops them.
+	if err := rcvr.HandleFlags(); err != nil {
+		rcvr.canc(fmt.Errorf("rcvr.HandleFlags: %w", err))
 		return
 	}
 
@@ -214,7 +232,8 @@ func (rcvr *Receiver) Run() {
 				return
 			case block, ok := <-blockCh:
 				if !ok {
-					continue
+					// The block channel is closed, no more samples are coming.
+					return
 				}
 
 				// Clear next map for this sample block.
@@ -321,7 +340,6 @@ func main() {
 	RegisterFlags()
 	EnvOverride()
 	flag.Parse()
-	rcvr.HandleFlags()
 
 	if *version {
 		if info, ok := debug.ReadBuildInfo(); ok {
