@@ -130,22 +130,21 @@ func (p *Parser) filter() {
 		a2 := c1 - c3 + c4 - c0      // 1001
 
 		// Quantize in the same loop
-		maxAbs := abs(a0)
+		best := a0
 		argmax := byte(0)
-		if abs(a1) > maxAbs {
-
-			maxAbs = abs(a1)
+		if abs(a1) > abs(best) {
+			best = a1
 			argmax = 1
 		}
-		if abs(a2) > maxAbs {
-			maxAbs = abs(a2)
+		if abs(a2) > abs(best) {
+			best = a2
 			argmax = 2
 		}
 
-		p.quantized[idx] = argmax
-		if [3]float32{a0, a1, a2}[argmax] > 0 {
-			p.quantized[idx] += 3
+		if best > 0 {
+			argmax += 3
 		}
+		p.quantized[idx] = argmax
 	}
 }
 
@@ -169,12 +168,24 @@ func (p *Parser) Parse(pkts []protocol.Data, msgCh chan protocol.Message, wg *sy
 	copy(p.signal, p.signal[cfg.BlockSize:])
 	copy(p.signal[cfg.PacketLength:], p.Decoder.Signal[cfg.SymbolLength:])
 
+	// The signal history above must be maintained every block, but the
+	// matched filter output is only consumed when there are candidate
+	// packets. Skip the (expensive) filter when there is nothing to parse.
+	if len(pkts) == 0 {
+		wg.Done()
+		return
+	}
+
 	p.filter()
 
 	preambleLength := cfg.PreambleLength
 	chipLength := cfg.ChipLength
 
-	symbols := make([]byte, 21)
+	var (
+		digits  [PayloadSymbols]byte
+		symbols [PayloadSymbols / 2]byte
+		bitsBuf [PayloadSymbols / 2 * 5]byte
+	)
 	zeros := make([]byte, 5)
 
 	seen := make(map[string]bool)
@@ -185,28 +196,30 @@ func (p *Parser) Parse(pkts []protocol.Data, msgCh chan protocol.Message, wg *sy
 		}
 
 		payloadIdx := pkt.Idx + preambleLength - p.cfg.SymbolLength
-		var digits string
-		for idx := 0; idx < PayloadSymbols*4*cfg.ChipLength; idx += chipLength * 4 {
-			qIdx := payloadIdx + idx
-
-			digits += strconv.Itoa(int(p.quantized[qIdx]))
+		for idx := range digits {
+			digits[idx] = p.quantized[payloadIdx+idx*chipLength*4]
 		}
 
-		var (
-			bits      string
-			badSymbol bool
-		)
+		// Each pair of base-6 digits forms one 5-bit symbol.
+		var badSymbol bool
 		for idx := 0; idx < len(digits); idx += 2 {
-			symbol, _ := strconv.ParseInt(digits[idx:idx+2], 6, 32)
+			symbol := digits[idx]*6 + digits[idx+1]
 			if symbol > 31 {
 				badSymbol = true
 				break
 			}
-			symbols[idx>>1] = byte(symbol)
-			bits += fmt.Sprintf("%05b", symbol)
+			symbols[idx>>1] = symbol
+			for b := 0; b < 5; b++ {
+				bitsBuf[(idx>>1)*5+b] = '0' + (symbol >> (4 - b) & 1)
+			}
 		}
 
-		if badSymbol || seen[bits] {
+		if badSymbol {
+			continue
+		}
+
+		bits := string(bitsBuf[:])
+		if seen[bits] {
 			continue
 		}
 
@@ -286,6 +299,11 @@ func (r900 R900) String() string {
 		r900.Leak,
 		r900.LeakNow,
 	)
+}
+
+// Headers returns column names matching Record.
+func (r900 R900) Headers() []string {
+	return []string{"ID", "Unkn1", "NoUse", "BackFlow", "Consumption", "Unkn3", "Leak", "LeakNow"}
 }
 
 func (r900 R900) Record() (r []string) {

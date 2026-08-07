@@ -148,6 +148,8 @@ func HandleFlags() {
 		encoder = json.NewEncoder(os.Stdout)
 	case "xml":
 		encoder = NewLineEncoder{xml.NewEncoder(os.Stdout)}
+	default:
+		log.Fatalf("invalid format: %q, must be one of: plain, csv, json, xml", *format)
 	}
 }
 

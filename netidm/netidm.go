@@ -210,6 +210,21 @@ func (netidm NetIDM) String() string {
 	return "{" + strings.Join(fields, " ") + "}"
 }
 
+// Headers returns column names matching Record.
+func (netidm NetIDM) Headers() (h []string) {
+	h = append(h,
+		"Preamble", "ProtocolID", "PacketLength", "HammingCode",
+		"ApplicationVersion", "ERTType", "ERTSerialNumber",
+		"ConsumptionIntervalCount", "ProgrammingState",
+		"LastGeneration", "LastConsumption", "LastConsumptionNet",
+	)
+	for idx := range netidm.DifferentialConsumptionIntervals {
+		h = append(h, fmt.Sprintf("DifferentialConsumptionIntervals_%d", idx))
+	}
+	h = append(h, "TransmitTimeOffset", "SerialNumberCRC", "PacketCRC")
+	return h
+}
+
 func (netidm NetIDM) Record() (r []string) {
 	r = append(r, fmt.Sprintf("0x%08X", netidm.Preamble))
 	r = append(r, fmt.Sprintf("0x%02X", netidm.ProtocolID))

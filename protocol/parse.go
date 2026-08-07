@@ -128,6 +128,19 @@ func (msg LogMessage) Record() (r []string) {
 	return r
 }
 
+// Headers returns column names matching Record, or nil if the wrapped
+// message doesn't provide headers.
+func (msg LogMessage) Headers() (h []string) {
+	hr, ok := msg.Message.(csv.HeaderRecorder)
+	if !ok {
+		return nil
+	}
+
+	h = append(h, "Time", "Offset", "Length")
+	h = append(h, hr.Headers()...)
+	return h
+}
+
 // A FilterChain takse a list of filters and applies them iteratively to
 // messages sent through the chain.
 type FilterChain []MessageFilter

@@ -128,9 +128,13 @@ func NewIDM(data protocol.Data) (idm IDM) {
 	idm.ERTSerialNumber = binary.BigEndian.Uint32(data.Bytes[9:13])
 	idm.ConsumptionIntervalCount = data.Bytes[13]
 	idm.ModuleProgrammingState = data.Bytes[14]
-	idm.TamperCounters = data.Bytes[15:21]
+	// Copy rather than alias: data.Bytes is a reused parse buffer that is
+	// overwritten while previously emitted messages may still be in use.
+	idm.TamperCounters = make([]byte, 6)
+	copy(idm.TamperCounters, data.Bytes[15:21])
 	idm.AsynchronousCounters = binary.BigEndian.Uint16(data.Bytes[21:23])
-	idm.PowerOutageFlags = data.Bytes[23:29]
+	idm.PowerOutageFlags = make([]byte, 6)
+	copy(idm.PowerOutageFlags, data.Bytes[23:29])
 	idm.LastConsumptionCount = binary.BigEndian.Uint32(data.Bytes[29:33])
 
 	offset := 264
@@ -196,6 +200,22 @@ func (idm IDM) String() string {
 	fields = append(fields, fmt.Sprintf("PacketCRC:0x%04X", idm.PacketCRC))
 
 	return "{" + strings.Join(fields, " ") + "}"
+}
+
+// Headers returns column names matching Record.
+func (idm IDM) Headers() (h []string) {
+	h = append(h,
+		"Preamble", "PacketTypeID", "PacketLength", "HammingCode",
+		"ApplicationVersion", "ERTType", "ERTSerialNumber",
+		"ConsumptionIntervalCount", "ModuleProgrammingState",
+		"TamperCounters", "AsynchronousCounters", "PowerOutageFlags",
+		"LastConsumptionCount",
+	)
+	for idx := range idm.DifferentialConsumptionIntervals {
+		h = append(h, fmt.Sprintf("DifferentialConsumptionIntervals_%d", idx))
+	}
+	h = append(h, "TransmitTimeOffset", "SerialNumberCRC", "PacketCRC")
+	return h
 }
 
 func (idm IDM) Record() (r []string) {

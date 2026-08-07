@@ -62,6 +62,65 @@ The following message types are supported by rtlamr:
 - **r900**: Message type used by Neptune R900 transmitters, provides total consumption and leak flags.
 - **r900bcd**: Some Neptune R900 meters report consumption as a binary-coded digits.
 
+### R900 Water Meters and Leak Flags
+
+Neptune R900 messages carry more than total consumption. The format is not
+published by the vendor, so field meanings below come from community reverse
+engineering — verify against a meter you control before relying on them:
+
+- **ID**: Meter serial number (printed on the meter's face/register).
+- **Consumption**: Total consumption. Some meters encode this as binary-coded
+  decimal; use `-msgtype=r900bcd` if consumption values from `r900` look wrong.
+- **NoUse**: Binned count of days with no usage over roughly the past 35 days.
+- **BackFlow**: Backflow detected during the past ~35 days: 0 = none,
+  1 = low, 2 = high.
+- **Leak**: Binned count of days a leak condition was flagged over roughly
+  the past 35 days.
+- **LeakNow**: Leak status for the past 24 hours: 0 = none, 1 = intermittent
+  leak, 2 = continuous leak (matches Neptune E-Coder intermittent/continuous
+  leak flags).
+- **Unkn1**, **Unkn3**: Unknown fields.
+
+To log every R900 reading to CSV (a header row is written automatically, and
+`-unique=true` suppresses repeated identical readings from the same meter):
+
+```bash
+rtlamr -msgtype=r900 -format=csv -unique=true | tee r900.csv
+```
+
+The resulting file can be sorted by the leak columns in any spreadsheet, or
+from a shell (`LeakNow` is column 11, `Leak` is column 10):
+
+```bash
+head -n1 r900.csv && tail -n +2 r900.csv | sort -t, -k11,11nr -k10,10nr
+```
+
+Note that R900 transmitters hop across many channels and rtlamr only listens
+to part of that band, so leave it running for a while — expect to catch each
+meter intermittently rather than on every transmission.
+
+### Low-power Devices and Multiple Dongles
+
+rtlamr talks to the dongle only through `rtl_tcp`, so it runs anywhere Go
+runs, including Android (e.g. in [Termux](https://termux.dev/)), with
+`rtl_tcp` either on the same device or elsewhere on the network.
+
+- To use two dongles on one host (a powered USB hub is recommended — each
+  dongle draws around 300mA), run one `rtl_tcp` per dongle and point a
+  separate rtlamr instance at each:
+
+  ```bash
+  rtl_tcp -d 0 -p 1234 &
+  rtl_tcp -d 1 -p 1235 &
+  rtlamr -server=127.0.0.1:1234 -msgtype=r900 -format=csv | tee r900.csv
+  rtlamr -server=127.0.0.1:1235 -msgtype=scm,scm+,idm -format=csv | tee ert.csv
+  ```
+
+- On CPU-constrained devices, reduce the sample rate with `-symbollength`.
+  The default of 72 samples per symbol needs ~2.4Msps; `-symbollength=32`
+  processes less than half as many samples per second at some cost in
+  sensitivity and channel coverage.
+
 ### Compatibility
 
 Currently the only tested meter is the Itron C1SR and Itron 40G. However, the protocol is designed to be useful for several different commodities and should be capable of receiving messages from any ERT capable smart meter.

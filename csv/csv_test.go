@@ -11,7 +11,7 @@ import (
 
 func TestRecorderNil(t *testing.T) {
 	buf := &bytes.Buffer{}
-	enc := Encoder{csv.NewWriter(buf)}
+	enc := Encoder{w: csv.NewWriter(buf)}
 
 	if err := enc.Encode(nil); err == nil {
 		t.Fatalf("%+v\n", err)
@@ -26,7 +26,7 @@ func (m Msg) Record() []string {
 
 func TestRecorder(t *testing.T) {
 	buf := &bytes.Buffer{}
-	enc := Encoder{csv.NewWriter(buf)}
+	enc := Encoder{w: csv.NewWriter(buf)}
 
 	if err := enc.Encode(Msg{}); err != nil {
 		t.Fatalf("%+v\n", err)
@@ -37,7 +37,7 @@ type NonRecorder struct{}
 
 func TestNonRecorder(t *testing.T) {
 	buf := &bytes.Buffer{}
-	enc := Encoder{csv.NewWriter(buf)}
+	enc := Encoder{w: csv.NewWriter(buf)}
 
 	err := enc.Encode(NonRecorder{})
 

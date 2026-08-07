@@ -99,7 +99,7 @@ type SCM struct {
 	EndpointID   uint32 `xml:",attr"`
 	Consumption  uint32 `xml:",attr"`
 	Tamper       uint16 `xml:",attr"`
-	PacketCRC    uint16 `xml:"Checksum,attr",json:"Checksum"`
+	PacketCRC    uint16 `xml:"Checksum,attr" json:"Checksum"`
 }
 
 func NewSCM(data protocol.Data) (scm SCM) {
@@ -135,6 +135,11 @@ func (scm SCM) String() string {
 		scm.Tamper,
 		scm.PacketCRC,
 	)
+}
+
+// Headers returns column names matching Record.
+func (scm SCM) Headers() []string {
+	return []string{"FrameSync", "ProtocolID", "EndpointType", "EndpointID", "Consumption", "Tamper", "PacketCRC"}
 }
 
 func (scm SCM) Record() (r []string) {

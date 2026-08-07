@@ -142,6 +142,11 @@ func (scm SCM) String() string {
 	)
 }
 
+// Headers returns column names matching Record.
+func (scm SCM) Headers() []string {
+	return []string{"ID", "Type", "TamperPhy", "TamperEnc", "Consumption", "Checksum"}
+}
+
 func (scm SCM) Record() (r []string) {
 	r = append(r, strconv.FormatUint(uint64(scm.ID), 10))
 	r = append(r, strconv.FormatUint(uint64(scm.Type), 10))
