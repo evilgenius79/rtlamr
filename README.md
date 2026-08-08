@@ -99,6 +99,25 @@ Note that R900 transmitters hop across many channels and rtlamr only listens
 to part of that band, so leave it running for a while — expect to catch each
 meter intermittently rather than on every transmission.
 
+### One-click Scanning: rtlamrscan
+
+`cmd/rtlamrscan` builds a launcher that runs a whole scan from a single
+program: it auto-detects up to two dongles, starts an `rtl_tcp` instance for
+each, decodes R900 on the first dongle (and SCM/SCM+/IDM on the second, if
+present), and writes timestamped CSV files to the current directory. Closing
+the window or pressing Ctrl+C stops everything, including the `rtl_tcp`
+child processes.
+
+```bash
+go build ./cmd/rtlamrscan
+```
+
+Put the resulting binary in the same folder as `rtlamr` and `rtl_tcp` (on
+Windows: `rtlamr.exe` and `rtl_tcp.exe` with its DLLs) and run it. Useful
+flags: `-duration 1h` to stop after a fixed time, `-dongles 1` to skip
+auto-detection, `-msgtype all` to decode every protocol on the first dongle,
+and `-outdir` to choose where CSVs are written.
+
 ### Low-power Devices and Multiple Dongles
 
 rtlamr talks to the dongle only through `rtl_tcp`, so it runs anywhere Go
