@@ -3,11 +3,18 @@
 // each, and writes timestamped CSV files. Closing the window (or Ctrl+C)
 // shuts everything down.
 //
+// In the default "water" mode every dongle decodes R900 water meters. R900
+// transmitters hop across the 902-928MHz band while each dongle only
+// captures a ~2.4MHz slice, so with two dongles the launcher tunes them to
+// adjacent slices (one below 912.4MHz, one above) and merges both decoders
+// into a single CSV, roughly doubling the number of transmissions caught.
+//
 // The rtl_tcp and rtlamr binaries are expected in the same directory as this
 // executable (or on PATH).
 package main
 
 import (
+	"bufio"
 	"bytes"
 	"context"
 	"flag"
@@ -27,17 +34,12 @@ var (
 	duration = flag.Duration("duration", 0, "how long to scan, 0 to run until closed, ex. 1h30m")
 	outDir   = flag.String("outdir", ".", "directory to write csv files to")
 	basePort = flag.Int("baseport", 12340, "first tcp port used for rtl_tcp instances")
-	msgType0 = flag.String("msgtype", "r900", "message types for the first dongle")
+	mode     = flag.String("mode", "water", "water: all dongles scan r900 water meters splitting bandwidth; mixed: dongle 1 water, dongle 2 electric/gas")
+	freqLow  = flag.Uint("freqlow", 911200000, "center frequency of the lower r900 slice when two dongles scan water")
+	freqHigh = flag.Uint("freqhigh", 913560000, "center frequency of the upper r900 slice when two dongles scan water")
 )
 
 const maxDongles = 2
-
-// Message types for each dongle: the first scans water meters (R900), the
-// second picks up the other ERT meter types.
-var dongleRoles = [maxDongles]struct{ msgType, filePrefix string }{
-	{"", "r900"}, // msgType filled from the -msgtype flag
-	{"scm,scm+,idm", "ert"},
-}
 
 var stderrMu sync.Mutex
 
@@ -56,11 +58,49 @@ func (w *prefixWriter) Write(p []byte) (int, error) {
 			break
 		}
 		stderrMu.Lock()
-		fmt.Fprintf(os.Stderr, "%-7s %s\n", w.prefix, bytes.TrimRight(w.buf[:idx], "\r"))
+		fmt.Fprintf(os.Stderr, "%-10s %s\n", w.prefix, bytes.TrimRight(w.buf[:idx], "\r"))
 		stderrMu.Unlock()
 		w.buf = w.buf[idx+1:]
 	}
 	return len(p), nil
+}
+
+// csvSink serializes CSV lines from one or more decoder processes into a
+// single file, writing the header row only once (repeated header lines,
+// e.g. from a second dongle or a decoder restart, are dropped).
+type csvSink struct {
+	mu         sync.Mutex
+	f          *os.File
+	headerLine string
+	gotHeader  bool
+}
+
+func newCSVSink(path string) (*csvSink, error) {
+	f, err := os.OpenFile(path, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0644)
+	if err != nil {
+		return nil, err
+	}
+	return &csvSink{f: f}, nil
+}
+
+func (s *csvSink) writeLine(line string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	if s.gotHeader && line == s.headerLine {
+		return
+	}
+	if !s.gotHeader {
+		s.headerLine = line
+		s.gotHeader = true
+	}
+	fmt.Fprintln(s.f, line)
+}
+
+func (s *csvSink) Close() error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.f.Close()
 }
 
 func exeName(name string) string {
@@ -117,26 +157,27 @@ func startRtlTCP(ctx context.Context, bin string, device, port int) (*exec.Cmd, 
 	}
 }
 
-// runDecoder runs rtlamr against an rtl_tcp port, writing CSV to a file.
-// It restarts the decoder a few times if it dies early (e.g. rtl_tcp wasn't
-// accepting connections yet).
-func runDecoder(ctx context.Context, bin string, port int, msgType, outPath string) error {
-	out, err := os.OpenFile(outPath, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0644)
-	if err != nil {
-		return err
-	}
-	defer out.Close()
+type instance struct {
+	device, port int
+	msgType      string
+	centerFreq   uint // 0 leaves rtlamr's default for the message type
+	label        string
+	sink         *csvSink
+	outPath      string
+}
 
-	label := fmt.Sprintf("[%s]", msgType)
-	if idx := bytes.IndexByte([]byte(msgType), ','); idx > 0 {
-		label = fmt.Sprintf("[%s..]", msgType[:idx])
-	}
-
+// runDecoder runs rtlamr against an rtl_tcp port, streaming CSV lines into
+// the instance's sink. It restarts the decoder a few times if it dies early
+// (e.g. rtl_tcp wasn't accepting connections yet).
+func runDecoder(ctx context.Context, bin string, inst instance) error {
 	args := []string{
-		"-server", fmt.Sprintf("127.0.0.1:%d", port),
-		"-msgtype", msgType,
+		"-server", fmt.Sprintf("127.0.0.1:%d", inst.port),
+		"-msgtype", inst.msgType,
 		"-format", "csv",
 		"-unique", "true",
+	}
+	if inst.centerFreq > 0 {
+		args = append(args, "-centerfreq", fmt.Sprintf("%d", inst.centerFreq))
 	}
 	if *duration > 0 {
 		args = append(args, "-duration", duration.String())
@@ -147,10 +188,23 @@ func runDecoder(ctx context.Context, bin string, port int, msgType, outPath stri
 		start := time.Now()
 
 		cmd := exec.CommandContext(ctx, bin, args...)
-		cmd.Stdout = out
-		cmd.Stderr = &prefixWriter{prefix: label}
+		cmd.Stderr = &prefixWriter{prefix: inst.label}
 
-		err := cmd.Run()
+		stdout, err := cmd.StdoutPipe()
+		if err != nil {
+			return err
+		}
+
+		if err := cmd.Start(); err != nil {
+			return err
+		}
+
+		scanner := bufio.NewScanner(stdout)
+		for scanner.Scan() {
+			inst.sink.writeLine(scanner.Text())
+		}
+
+		err = cmd.Wait()
 
 		if ctx.Err() != nil || err == nil {
 			return nil
@@ -162,7 +216,7 @@ func runDecoder(ctx context.Context, bin string, port int, msgType, outPath stri
 		if time.Since(start) < 10*time.Second {
 			time.Sleep(2 * time.Second)
 		}
-		log.Printf("%s rtlamr exited (%v), restarting (attempt %d/%d)", label, err, attempt+1, maxAttempts)
+		log.Printf("%s rtlamr exited (%v), restarting (attempt %d/%d)", inst.label, err, attempt+1, maxAttempts)
 	}
 }
 
@@ -172,6 +226,9 @@ func main() {
 
 	if *dongles < 0 || *dongles > maxDongles {
 		log.Fatalf("-dongles must be between 0 and %d", maxDongles)
+	}
+	if *mode != "water" && *mode != "mixed" {
+		log.Fatalf("-mode must be water or mixed")
 	}
 
 	rtlTCPBin, err := findBinary("rtl_tcp")
@@ -203,19 +260,9 @@ func main() {
 		want = maxDongles
 	}
 
-	type instance struct {
-		device, port int
-		msgType      string
-		outPath      string
-	}
-	var instances []instance
-
-	timestamp := time.Now().Format("20060102_150405")
-
+	found := 0
 	for device := 0; device < want; device++ {
-		port := *basePort + device
-		_, err := startRtlTCP(ctx, rtlTCPBin, device, port)
-		if err != nil {
+		if _, err := startRtlTCP(ctx, rtlTCPBin, device, *basePort+device); err != nil {
 			if *dongles == 0 && device > 0 {
 				break // auto-detect: ran out of dongles
 			}
@@ -226,22 +273,61 @@ func main() {
 			waitForEnter()
 			os.Exit(1)
 		}
-
-		role := dongleRoles[device]
-		msgType := role.msgType
-		if device == 0 {
-			msgType = *msgType0
-		}
-
-		instances = append(instances, instance{
-			device:  device,
-			port:    port,
-			msgType: msgType,
-			outPath: filepath.Join(*outDir, fmt.Sprintf("%s_%s.csv", role.filePrefix, timestamp)),
-		})
+		found++
 	}
 
-	log.Printf("found %d dongle(s)", len(instances))
+	log.Printf("found %d dongle(s)", found)
+
+	timestamp := time.Now().Format("20060102_150405")
+	waterPath := filepath.Join(*outDir, fmt.Sprintf("r900_%s.csv", timestamp))
+
+	waterSink, err := newCSVSink(waterPath)
+	if err != nil {
+		log.Printf("error: %v", err)
+		waitForEnter()
+		os.Exit(1)
+	}
+	defer waterSink.Close()
+
+	var instances []instance
+
+	// The first dongle always scans water meters. With a single dongle it
+	// stays on rtlamr's default r900 frequency; when a second dongle shares
+	// the load in water mode, the two are tuned to adjacent slices.
+	first := instance{
+		device: 0, port: *basePort,
+		msgType: "r900", label: "[r900]", sink: waterSink, outPath: waterPath,
+	}
+
+	switch {
+	case *mode == "water" && found >= 2:
+		first.centerFreq = *freqLow
+		first.label = "[r900-lo]"
+		instances = append(instances, first, instance{
+			device: 1, port: *basePort + 1,
+			msgType: "r900", centerFreq: *freqHigh,
+			label: "[r900-hi]", sink: waterSink, outPath: waterPath,
+		})
+		log.Printf("water mode: dongle 0 centered at %dHz, dongle 1 at %dHz", *freqLow, *freqHigh)
+
+	case *mode == "mixed" && found >= 2:
+		ertPath := filepath.Join(*outDir, fmt.Sprintf("ert_%s.csv", timestamp))
+		ertSink, err := newCSVSink(ertPath)
+		if err != nil {
+			log.Printf("error: %v", err)
+			waitForEnter()
+			os.Exit(1)
+		}
+		defer ertSink.Close()
+
+		instances = append(instances, first, instance{
+			device: 1, port: *basePort + 1,
+			msgType: "scm,scm+,idm", label: "[ert]", sink: ertSink, outPath: ertPath,
+		})
+
+	default:
+		instances = append(instances, first)
+	}
 
 	var wg sync.WaitGroup
 	for _, inst := range instances {
@@ -250,7 +336,7 @@ func main() {
 		wg.Add(1)
 		go func(inst instance) {
 			defer wg.Done()
-			if err := runDecoder(ctx, rtlamrBin, inst.port, inst.msgType, inst.outPath); err != nil && ctx.Err() == nil {
+			if err := runDecoder(ctx, rtlamrBin, inst); err != nil && ctx.Err() == nil {
 				log.Printf("dongle %d: %v", inst.device, err)
 			}
 		}(inst)

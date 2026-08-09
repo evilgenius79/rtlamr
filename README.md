@@ -103,10 +103,17 @@ meter intermittently rather than on every transmission.
 
 `cmd/rtlamrscan` builds a launcher that runs a whole scan from a single
 program: it auto-detects up to two dongles, starts an `rtl_tcp` instance for
-each, decodes R900 on the first dongle (and SCM/SCM+/IDM on the second, if
-present), and writes timestamped CSV files to the current directory. Closing
-the window or pressing Ctrl+C stops everything, including the `rtl_tcp`
-child processes.
+each, runs a decoder against each, and writes timestamped CSV files to the
+current directory. Closing the window or pressing Ctrl+C stops everything,
+including the `rtl_tcp` child processes.
+
+By default it scans water meters only. R900 transmitters hop across
+902-928MHz while each dongle captures only a ~2.4MHz slice, so with two
+dongles the launcher tunes them to adjacent slices — one centered at
+911.2MHz, one at 913.56MHz, covering roughly 910-914.7MHz with no gap —
+and merges both decoders into a single `r900_<timestamp>.csv`, roughly
+doubling the number of transmissions caught. With one dongle it stays on
+the default 912.38MHz center.
 
 ```bash
 go build ./cmd/rtlamrscan
@@ -114,8 +121,9 @@ go build ./cmd/rtlamrscan
 
 Put the resulting binary in the same folder as `rtlamr` and `rtl_tcp` (on
 Windows: `rtlamr.exe` and `rtl_tcp.exe` with its DLLs) and run it. Useful
-flags: `-duration 1h` to stop after a fixed time, `-dongles 1` to skip
-auto-detection, `-msgtype all` to decode every protocol on the first dongle,
+flags: `-mode mixed` to instead decode electric/gas (SCM/SCM+/IDM) on the
+second dongle, `-duration 1h` to stop after a fixed time, `-dongles 1` to
+skip auto-detection, `-freqlow`/`-freqhigh` to tune the two water slices,
 and `-outdir` to choose where CSVs are written.
 
 ### Low-power Devices and Multiple Dongles
