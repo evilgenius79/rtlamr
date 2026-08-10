@@ -40,7 +40,7 @@ import (
 )
 
 var (
-	dongles  = flag.Int("dongles", 0, "number of dongles to use, 0 to auto-detect (max 3)")
+	dongles  = flag.Int("dongles", 1, "number of dongles to use (max 3), 0 to auto-detect")
 	duration = flag.Duration("duration", 0, "how long to scan, 0 to run until closed, ex. 1h30m")
 	outDir   = flag.String("outdir", ".", "directory to write csv files to")
 	basePort = flag.Int("baseport", 12340, "first tcp port used for rtl_tcp instances")
@@ -50,6 +50,7 @@ var (
 	gpsPort  = flag.String("gps", "", "serial port of NMEA GPS receiver, ex. COM13 (survey mode)")
 	gpsBaud  = flag.Int("gpsbaud", 0, "baud rate of the GPS serial port, 0 to auto-detect (tries 460800 first)")
 	gpsTest  = flag.Bool("gpstest", false, "preflight: check the GPS puck (baud, talker, fix) and exit without scanning")
+	httpAddr = flag.String("http", "127.0.0.1:8321", `live dashboard address, "off" to disable`)
 )
 
 const maxDongles = 3
@@ -432,6 +433,19 @@ func main() {
 		return []string{"-centerfreq", strconv.FormatUint(uint64(freq), 10)}
 	}
 
+	stats := newStatsCollector(*mode, gps)
+
+	// wrap adds a radio to the dashboard and tees its decoder output
+	// through the stats collector on the way to the line handler.
+	wrap := func(device int, displayFreq uint, next func(string)) func(string) {
+		if displayFreq == 0 {
+			displayFreq = 912380000 // rtlamr's default r900 center
+		}
+		stats.addRadio(device, uint64(displayFreq))
+		tee := &statsLine{stats: stats, radio: device, next: next}
+		return tee.handleLine
+	}
+
 	var instances []instance
 	var sinks []*csvSink
 
@@ -460,7 +474,7 @@ func main() {
 				device: device, port: *basePort + device,
 				args:       args,
 				label:      fmt.Sprintf("[radio%d]", device),
-				handleLine: mapper.handleLine,
+				handleLine: wrap(device, plan[device], mapper.handleLine),
 				outPath:    outPath,
 			})
 		}
@@ -483,7 +497,7 @@ func main() {
 				device: device, port: *basePort + device,
 				args:       args,
 				label:      fmt.Sprintf("[r900-%d]", device),
-				handleLine: sink.writeLine,
+				handleLine: wrap(device, plan[device], sink.writeLine),
 				outPath:    outPath,
 			})
 		}
@@ -502,7 +516,7 @@ func main() {
 			device: 0, port: *basePort,
 			args:       args,
 			label:      "[r900]",
-			handleLine: waterSink.writeLine,
+			handleLine: wrap(0, 912380000, waterSink.writeLine),
 			outPath:    waterPath,
 		})
 
@@ -520,7 +534,7 @@ func main() {
 				device: 1, port: *basePort + 1,
 				args:       args,
 				label:      "[ert]",
-				handleLine: ertSink.writeLine,
+				handleLine: wrap(1, 912600155, ertSink.writeLine),
 				outPath:    ertPath,
 			})
 		}
@@ -547,6 +561,15 @@ func main() {
 
 	done := make(chan struct{})
 	go func() { wg.Wait(); close(done) }()
+
+	if *httpAddr != "" && *httpAddr != "off" {
+		if url, err := startDashboard(*httpAddr, stats); err != nil {
+			log.Printf("warning: dashboard unavailable: %v", err)
+		} else {
+			log.Printf("dashboard: %s", url)
+			openBrowser(url)
+		}
+	}
 
 	log.Printf("scanning... close this window or press Ctrl+C to stop")
 

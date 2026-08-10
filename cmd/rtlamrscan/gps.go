@@ -48,6 +48,36 @@ func (g *gpsReader) current(maxAge time.Duration) (gpsFix, bool) {
 	return g.fix, true
 }
 
+// gpsStatus is the dashboard-facing view of the GPS state.
+type gpsStatus struct {
+	HasFix     bool    `json:"hasFix"`
+	EverHadFix bool    `json:"everHadFix"`
+	Lat        float64 `json:"lat"`
+	Lon        float64 `json:"lon"`
+	Quality    int     `json:"quality"`
+	NumSats    int     `json:"numSats"`
+	HDOP       float64 `json:"hdop"`
+	AgeSec     float64 `json:"ageSec"`
+	Talker     string  `json:"talker"`
+}
+
+func (g *gpsReader) statusSnapshot(maxAge time.Duration) gpsStatus {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+
+	st := gpsStatus{EverHadFix: g.hadFix, Talker: g.talker}
+	if g.valid {
+		age := time.Since(g.fix.when)
+		if age <= maxAge {
+			st.HasFix = true
+			st.Lat, st.Lon = g.fix.Lat, g.fix.Lon
+			st.Quality, st.NumSats, st.HDOP = g.fix.Quality, g.fix.NumSats, g.fix.HDOP
+			st.AgeSec = age.Seconds()
+		}
+	}
+	return st
+}
+
 // status describes the reader's state for preflight/diagnostic output.
 func (g *gpsReader) status() string {
 	g.mu.Lock()

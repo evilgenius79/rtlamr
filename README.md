@@ -162,9 +162,18 @@ readings suppressed, merged into one `r900_<timestamp>.csv`.
 **mixed mode** (`-mode mixed`) decodes R900 on dongle 1 and electric/gas
 (SCM/SCM+/IDM) on dongle 2.
 
-Other flags: `-duration 1h` to stop after a fixed time, `-dongles N` to skip
-auto-detection, `-freqs 906000000,912380000,918500000` to override the
-per-dongle centers, and `-outdir` to choose where CSVs are written.
+**Live dashboard.** While scanning, rtlamrscan serves a live stats page at
+`http://127.0.0.1:8321` and opens it in the default browser: meters found,
+leak-flagged meters, bursts captured, per-radio health (center frequency,
+burst count, time since last decode), GPS fix status with position and
+satellite count, and a feed of recent bursts. The page is served entirely
+from the binary and works offline. Change the address with `-http`, or
+disable with `-http off`.
+
+Other flags: `-duration 1h` to stop after a fixed time, `-dongles N` to use
+more than the default single dongle (`-dongles 0` auto-detects up to 3),
+`-freqs 906000000,912380000,918500000` to override the per-dongle centers,
+and `-outdir` to choose where CSVs are written.
 
 ### Low-power Devices and Multiple Dongles
 
