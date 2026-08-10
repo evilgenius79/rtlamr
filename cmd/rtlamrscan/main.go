@@ -47,8 +47,9 @@ var (
 	mode     = flag.String("mode", "survey", "survey: mobile drive-by with gps+rssi; water: stationary r900 scan; mixed: dongle 1 water, dongle 2 electric/gas")
 	freqs    = flag.String("freqs", "", "comma-separated center frequencies in Hz, one per dongle (default: per-mode plan)")
 	gain     = flag.Float64("gain", 40, "fixed tuner gain in dB for all radios (rssi comparability); applied in survey mode, or in other modes when set explicitly")
-	gpsPort  = flag.String("gps", "", "serial port of NMEA GPS receiver, ex. COM4 (survey mode)")
-	gpsBaud  = flag.Int("gpsbaud", 9600, "baud rate of the GPS serial port (usually 9600 or 4800)")
+	gpsPort  = flag.String("gps", "", "serial port of NMEA GPS receiver, ex. COM13 (survey mode)")
+	gpsBaud  = flag.Int("gpsbaud", 0, "baud rate of the GPS serial port, 0 to auto-detect (tries 460800 first)")
+	gpsTest  = flag.Bool("gpstest", false, "preflight: check the GPS puck (baud, talker, fix) and exit without scanning")
 )
 
 const maxDongles = 3
@@ -369,16 +370,24 @@ func main() {
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt)
 	defer stop()
 
-	// GPS first: a typo'd COM port should fail before radios spin up.
+	// GPS first: a typo'd COM port or wrong baud should fail before radios
+	// spin up.
 	var gps *gpsReader
 	if *gpsPort != "" {
 		gps, err = startGPS(ctx, *gpsPort, *gpsBaud)
 		if err != nil {
 			fatal("error opening gps port %s: %v", *gpsPort, err)
 		}
-		log.Printf("gps: reading NMEA from %s at %d baud", *gpsPort, *gpsBaud)
+	} else if *gpsTest {
+		fatal("-gpstest needs -gps <port>, ex. -gps COM13")
 	} else if *mode == "survey" {
 		log.Printf("warning: no -gps port given, position columns will be blank")
+	}
+
+	if *gpsTest {
+		runGPSTest(ctx, gps)
+		waitForEnter()
+		return
 	}
 
 	// Start rtl_tcp for each dongle. In auto-detect mode, keep going until a

@@ -129,10 +129,20 @@ hop band (906.0/912.38/918.5MHz for three; a tiled pair around 912.38MHz for
 two), every burst is kept as its own row (no dedup — each burst is a
 position+signal sample), all radios run at the same fixed tuner gain
 (`-gain`, default 40dB) so RSSI is comparable, and rows are appended to disk
-as they decode. With `-gps COM4` (`-gpsbaud 4800` if needed) a USB NMEA GPS
-puck stamps every row with the position at decode time; without a fix the
-position columns are blank, never 0,0. Output is a single merged
-`survey_<timestamp>.csv`:
+as they decode. With `-gps COM13` a USB NMEA GPS puck stamps every row with
+the position at decode time. The baud rate is auto-detected (460800 — common
+on modern pucks — is tried first, then 9600/115200/38400/57600/4800; force
+one with `-gpsbaud`), and sentences from any talker (`$GPGGA`, `$GNGGA`,
+`$GLGGA`, ...) are accepted with checksum validation. Without a fix the
+position columns are blank, never 0,0. Before a drive, verify the puck with:
+
+```
+rtlamrscan -gps COM13 -gpstest
+```
+
+which reports the detected baud, the talker ID, and live fix status (expect
+no fix indoors — the antenna needs sky view). Output of a survey run is a
+single merged `survey_<timestamp>.csv`:
 
 ```
 Time,Radio,Lat,Lon,FixQuality,NumSats,HDOP,RSSI,SNR,ID,BackFlow,Consumption,Leak,LeakNow

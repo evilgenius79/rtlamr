@@ -2,7 +2,9 @@ package main
 
 import (
 	"bufio"
+	"bytes"
 	"context"
+	"fmt"
 	"log"
 	"strconv"
 	"strings"
@@ -11,6 +13,10 @@ import (
 
 	"go.bug.st/serial"
 )
+
+// Baud rates tried during auto-detection, most likely first. 460800 leads
+// because that's what modern u-blox based pucks ship at.
+var gpsBaudCandidates = []int{460800, 9600, 115200, 38400, 57600, 4800}
 
 // gpsFix is the most recent position report from the GPS receiver.
 type gpsFix struct {
@@ -24,9 +30,11 @@ type gpsFix struct {
 // gpsReader consumes NMEA sentences from a serial port in the background and
 // keeps the latest valid fix.
 type gpsReader struct {
-	mu    sync.Mutex
-	fix   gpsFix
-	valid bool
+	mu     sync.Mutex
+	fix    gpsFix
+	valid  bool
+	talker string // e.g. "GN", "GP"; first talker seen on a GGA sentence
+	hadFix bool   // whether a fix was ever acquired (for log messages)
 }
 
 // current returns the latest fix, or ok=false when there is no valid fix or
@@ -40,19 +48,91 @@ func (g *gpsReader) current(maxAge time.Duration) (gpsFix, bool) {
 	return g.fix, true
 }
 
-func (g *gpsReader) update(fix gpsFix, valid bool) {
+// status describes the reader's state for preflight/diagnostic output.
+func (g *gpsReader) status() string {
 	g.mu.Lock()
 	defer g.mu.Unlock()
-	g.fix, g.valid = fix, valid
+
+	talker := "no NMEA seen yet"
+	if g.talker != "" {
+		talker = "$" + g.talker + "GGA"
+	}
+	if !g.valid {
+		return fmt.Sprintf("no fix (%s)", talker)
+	}
+	return fmt.Sprintf("fix: %.6f,%.6f quality=%d sats=%d hdop=%.1f (%s)",
+		g.fix.Lat, g.fix.Lon, g.fix.Quality, g.fix.NumSats, g.fix.HDOP, talker)
 }
 
-// startGPS opens the named serial port and consumes NMEA from it until the
-// context is cancelled.
-func startGPS(ctx context.Context, portName string, baud int) (*gpsReader, error) {
-	port, err := serial.Open(portName, &serial.Mode{BaudRate: baud})
+// detectGPSPort opens the port and finds a baud rate producing valid NMEA.
+// A forced baud (> 0) is the only one tried.
+func detectGPSPort(portName string, forced int) (serial.Port, int, error) {
+	candidates := gpsBaudCandidates
+	if forced > 0 {
+		candidates = []int{forced}
+	}
+
+	port, err := serial.Open(portName, &serial.Mode{BaudRate: candidates[0]})
+	if err != nil {
+		return nil, 0, err
+	}
+
+	buf := make([]byte, 512)
+	for _, baud := range candidates {
+		if err := port.SetMode(&serial.Mode{BaudRate: baud}); err != nil {
+			continue
+		}
+		port.SetReadTimeout(300 * time.Millisecond)
+		port.ResetInputBuffer()
+
+		var window bytes.Buffer
+		deadline := time.Now().Add(2 * time.Second)
+		for time.Now().Before(deadline) {
+			n, err := port.Read(buf)
+			if err != nil {
+				break
+			}
+			window.Write(buf[:n])
+			if containsValidNMEA(window.String()) {
+				// Back to blocking reads for the long-running reader.
+				port.SetReadTimeout(serial.NoTimeout)
+				return port, baud, nil
+			}
+			// Keep the scan window bounded on noisy input.
+			if window.Len() > 8192 {
+				tail := window.String()[window.Len()-1024:]
+				window.Reset()
+				window.WriteString(tail)
+			}
+		}
+	}
+
+	port.Close()
+	if forced > 0 {
+		return nil, 0, fmt.Errorf("no valid NMEA at %d baud - try -gpsbaud 0 to auto-detect", forced)
+	}
+	return nil, 0, fmt.Errorf("no valid NMEA at any of %v baud - is this the right port?", gpsBaudCandidates)
+}
+
+// containsValidNMEA reports whether the buffer holds at least one complete
+// NMEA sentence with a correct checksum.
+func containsValidNMEA(s string) bool {
+	for _, line := range strings.Split(s, "\n") {
+		if _, ok := nmeaChecksumOK(strings.TrimSpace(line)); ok {
+			return true
+		}
+	}
+	return false
+}
+
+// startGPS opens the named serial port (auto-detecting the baud rate unless
+// one is forced) and consumes NMEA from it until the context is cancelled.
+func startGPS(ctx context.Context, portName string, forcedBaud int) (*gpsReader, error) {
+	port, baud, err := detectGPSPort(portName, forcedBaud)
 	if err != nil {
 		return nil, err
 	}
+	log.Printf("[gps] valid NMEA on %s at %d baud", portName, baud)
 
 	g := &gpsReader{}
 
@@ -84,7 +164,45 @@ func (g *gpsReader) handleSentence(s string) {
 		return
 	}
 	fix.when = time.Now()
-	g.update(fix, valid)
+
+	g.mu.Lock()
+	if g.talker == "" && len(s) >= 3 {
+		g.talker = s[1:3]
+		log.Printf("[gps] talker $%sGGA", g.talker)
+	}
+	if valid && !g.hadFix {
+		g.hadFix = true
+		log.Printf("[gps] fix acquired: %.6f,%.6f (%d sats)", fix.Lat, fix.Lon, fix.NumSats)
+	}
+	if !valid && g.valid {
+		log.Printf("[gps] fix lost")
+	}
+	g.fix, g.valid = fix, valid
+	g.mu.Unlock()
+}
+
+// runGPSTest is the -gpstest preflight: it prints live fix status once per
+// second so the puck, baud, talker, and sky view can be verified before a
+// drive. Runs until Ctrl+C or two minutes, whichever comes first.
+func runGPSTest(ctx context.Context, g *gpsReader) {
+	log.Printf("[gps] test mode: watching for fixes for up to 2 minutes, Ctrl+C to stop")
+	log.Printf("[gps] no fix indoors is normal - the antenna needs sky view")
+
+	deadline := time.After(2 * time.Minute)
+	tick := time.NewTicker(time.Second)
+	defer tick.Stop()
+
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-deadline:
+			log.Printf("[gps] test finished: %s", g.status())
+			return
+		case <-tick.C:
+			log.Printf("[gps] %s", g.status())
+		}
+	}
 }
 
 // nmeaChecksumOK verifies the $...*hh sentence checksum and returns the
@@ -109,9 +227,10 @@ func nmeaChecksumOK(s string) (string, bool) {
 	return s[1:star], true
 }
 
-// parseGGA parses a GGA sentence (any talker: GPGGA, GNGGA, ...). ok reports
-// whether the sentence was a well-formed GGA at all; valid reports whether it
-// carries a usable fix.
+// parseGGA parses a GGA sentence from any talker ($GPGGA, $GNGGA, $GLGGA,
+// $GAGGA, ...): the sentence type is matched on the "GGA" part alone. ok
+// reports whether the sentence was a well-formed GGA at all; valid reports
+// whether it carries a usable fix.
 func parseGGA(s string) (fix gpsFix, valid, ok bool) {
 	payload, ck := nmeaChecksumOK(s)
 	if !ck {

@@ -32,6 +32,28 @@ func TestParseGGASouthWest(t *testing.T) {
 	}
 }
 
+func TestParseGGAAnyTalker(t *testing.T) {
+	// Multi-constellation pucks use talkers other than GP; the type match
+	// must be on the "GGA" part alone.
+	for _, s := range []string{
+		"$GLGGA,123519,4807.038,N,01131.000,E,1,08,0.9,545.4,M,46.9,M,,*5B",
+	} {
+		if _, valid, ok := parseGGA(s); !ok || !valid {
+			t.Fatalf("expected %q to parse as a valid GGA, got ok=%v valid=%v", s, ok, valid)
+		}
+	}
+}
+
+func TestContainsValidNMEA(t *testing.T) {
+	garbage := "\xfe\x01ju nk\r\n$GPGGA,bad*FF\r\n"
+	if containsValidNMEA(garbage) {
+		t.Fatal("garbage must not count as valid NMEA")
+	}
+	if !containsValidNMEA(garbage + "$GPGGA,123519,4807.038,N,01131.000,E,1,08,0.9,545.4,M,46.9,M,,*47\r\n") {
+		t.Fatal("valid sentence after garbage must be detected")
+	}
+}
+
 func TestParseGGANoFix(t *testing.T) {
 	// Quality 0 with empty coordinates: well-formed but not a usable fix.
 	_, valid, ok := parseGGA("$GPGGA,123519,,,,,0,00,,,M,,M,,*6B")
