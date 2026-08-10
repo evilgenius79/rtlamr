@@ -178,7 +178,8 @@ function renderGPS(d) {
     el.style.borderColor = "var(--good)";
     el.innerHTML = '<span class="dot" style="color:var(--good)">&#9679;</span> GPS FIX ' +
       '<span class="detail">' + g.lat.toFixed(6) + ", " + g.lon.toFixed(6) +
-      " &middot; " + g.numSats + " sats &middot; HDOP " + g.hdop.toFixed(1) + "</span>";
+      " &middot; " + g.numSats + " sats &middot; HDOP " + g.hdop.toFixed(1) +
+      " &middot; " + g.speedKmh.toFixed(0) + " km/h</span>";
   } else if (g.everHadFix) {
     el.style.borderColor = "var(--critical)";
     el.innerHTML = '<span class="dot" style="color:var(--critical)">&#10005;</span> GPS FIX LOST ' +

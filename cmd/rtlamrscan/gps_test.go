@@ -17,6 +17,24 @@ func TestParseGGA(t *testing.T) {
 	if fix.Quality != 1 || fix.NumSats != 8 || math.Abs(fix.HDOP-0.9) > 0.001 {
 		t.Fatalf("bad metadata: %+v", fix)
 	}
+	if math.Abs(fix.AltM-545.4) > 0.001 {
+		t.Fatalf("bad altitude: %+v", fix)
+	}
+}
+
+func TestParseRMC(t *testing.T) {
+	speed, course, valid, ok := parseRMC("$GNRMC,123519,A,4807.038,N,01131.000,E,10.5,084.4,230394,,,A*52")
+	if !ok || !valid {
+		t.Fatalf("expected valid RMC, got ok=%v valid=%v", ok, valid)
+	}
+	if math.Abs(speed-10.5*1.852) > 0.001 || math.Abs(course-84.4) > 0.001 {
+		t.Fatalf("bad speed/course: %.2f km/h, %.1f deg", speed, course)
+	}
+
+	// Status V: well-formed but unusable.
+	if _, _, valid, ok := parseRMC("$GNRMC,123519,V,,,,,,,230394,,,N*4F"); !ok || valid {
+		t.Fatalf("expected recognized-but-invalid RMC, got ok=%v valid=%v", ok, valid)
+	}
 }
 
 func TestParseGGASouthWest(t *testing.T) {

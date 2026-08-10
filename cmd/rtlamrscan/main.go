@@ -27,6 +27,7 @@ import (
 	"context"
 	"flag"
 	"fmt"
+	"io"
 	"log"
 	"os"
 	"os/exec"
@@ -59,7 +60,14 @@ const maxDongles = 3
 // with blank position columns instead.
 const gpsMaxAge = 10 * time.Second
 
-var stderrMu sync.Mutex
+var (
+	stderrMu sync.Mutex
+	// consoleOut receives all launcher and child-process log output. It is
+	// swapped for a tee (console + scan log file) once a run starts, so the
+	// full run record — fix acquired/lost, radio restarts, rtl_tcp chatter —
+	// survives alongside the data CSVs.
+	consoleOut io.Writer = os.Stderr
+)
 
 // prefixWriter labels each line of a child process's output so interleaved
 // logs from multiple processes stay readable.
@@ -76,7 +84,7 @@ func (w *prefixWriter) Write(p []byte) (int, error) {
 			break
 		}
 		stderrMu.Lock()
-		fmt.Fprintf(os.Stderr, "%-10s %s\n", w.prefix, bytes.TrimRight(w.buf[:idx], "\r"))
+		fmt.Fprintf(consoleOut, "%-10s %s\n", w.prefix, bytes.TrimRight(w.buf[:idx], "\r"))
 		stderrMu.Unlock()
 		w.buf = w.buf[idx+1:]
 	}
@@ -122,16 +130,23 @@ func (s *csvSink) Close() error {
 	return s.f.Close()
 }
 
-// surveyColumns is the row shape handed downstream for mapping.
+// surveyColumns is the row shape handed downstream for mapping. The first
+// fourteen columns are the agreed target shape; everything after LeakNow is
+// appended so positional parsers keep working: the remaining decoder fields
+// (Unkn1/NoUse/Unkn3), the radio's center frequency, and extra GPS detail
+// (altitude, ground speed, course, fix age) for tighter position estimates.
 var surveyColumns = []string{
 	"Time", "Radio", "Lat", "Lon", "FixQuality", "NumSats", "HDOP",
 	"RSSI", "SNR", "ID", "BackFlow", "Consumption", "Leak", "LeakNow",
+	"FreqHz", "Unkn1", "NoUse", "Unkn3",
+	"AltitudeM", "SpeedKmh", "Course", "GPSAgeSec",
 }
 
 // surveyMapper reshapes rtlamr CSV rows into the survey row shape, stamping
 // each with the radio index and the GPS fix current at decode time.
 type surveyMapper struct {
 	radio  int
+	freqHz uint64
 	gps    *gpsReader
 	sink   *csvSink
 	colIdx map[string]int
@@ -167,14 +182,18 @@ func (m *surveyMapper) handleLine(line string) {
 	}
 
 	// Blank position columns when there's no usable fix; never 0,0.
-	var lat, lon, quality, sats, hdop string
+	var lat, lon, quality, sats, hdop, alt, speed, course, age string
 	if m.gps != nil {
-		if fix, ok := m.gps.current(gpsMaxAge); ok {
-			lat = strconv.FormatFloat(fix.Lat, 'f', 6, 64)
-			lon = strconv.FormatFloat(fix.Lon, 'f', 6, 64)
-			quality = strconv.Itoa(fix.Quality)
-			sats = strconv.Itoa(fix.NumSats)
-			hdop = strconv.FormatFloat(fix.HDOP, 'f', 1, 64)
+		if st := m.gps.statusSnapshot(gpsMaxAge); st.HasFix {
+			lat = strconv.FormatFloat(st.Lat, 'f', 6, 64)
+			lon = strconv.FormatFloat(st.Lon, 'f', 6, 64)
+			quality = strconv.Itoa(st.Quality)
+			sats = strconv.Itoa(st.NumSats)
+			hdop = strconv.FormatFloat(st.HDOP, 'f', 1, 64)
+			alt = strconv.FormatFloat(st.AltM, 'f', 1, 64)
+			speed = strconv.FormatFloat(st.SpeedKmh, 'f', 1, 64)
+			course = strconv.FormatFloat(st.Course, 'f', 0, 64)
+			age = strconv.FormatFloat(st.AgeSec, 'f', 1, 64)
 		}
 	}
 
@@ -182,6 +201,8 @@ func (m *surveyMapper) handleLine(line string) {
 		get("Time"), strconv.Itoa(m.radio), lat, lon, quality, sats, hdop,
 		get("RSSI"), get("SNR"), get("ID"), get("BackFlow"),
 		get("Consumption"), get("Leak"), get("LeakNow"),
+		strconv.FormatUint(m.freqHz, 10), get("Unkn1"), get("NoUse"), get("Unkn3"),
+		alt, speed, course, age,
 	}
 	m.sink.writeLine(strings.Join(row, ","))
 }
@@ -333,6 +354,36 @@ func fatal(format string, args ...interface{}) {
 	os.Exit(1)
 }
 
+// writeRunInfo records the run's configuration next to its data files.
+func writeRunInfo(path string, instances []instance, gainSet bool) {
+	f, err := os.Create(path)
+	if err != nil {
+		log.Printf("warning: cannot write run info %s: %v", path, err)
+		return
+	}
+	defer f.Close()
+
+	fmt.Fprintf(f, "started: %s\n", time.Now().Format(time.RFC3339))
+	fmt.Fprintf(f, "mode: %s\n", *mode)
+	fmt.Fprintf(f, "command: %s\n", strings.Join(os.Args, " "))
+	if gainSet {
+		fmt.Fprintf(f, "tuner gain: fixed %.1f dB on all radios\n", *gain)
+	} else {
+		fmt.Fprintf(f, "tuner gain: automatic (rssi not comparable between runs)\n")
+	}
+	if *gpsPort != "" {
+		fmt.Fprintf(f, "gps: %s\n", *gpsPort)
+	} else {
+		fmt.Fprintf(f, "gps: none\n")
+	}
+	if *duration > 0 {
+		fmt.Fprintf(f, "duration limit: %s\n", *duration)
+	}
+	for _, inst := range instances {
+		fmt.Fprintf(f, "dongle %d: rtlamr %s -> %s\n", inst.device, strings.Join(inst.args, " "), inst.outPath)
+	}
+}
+
 func main() {
 	log.SetFlags(log.Ltime)
 	flag.Parse()
@@ -370,6 +421,22 @@ func main() {
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt)
 	defer stop()
+
+	timestamp := time.Now().Format("20060102_150405")
+
+	// Tee all log output into a run log file so events like GPS fix
+	// loss and radio restarts are part of the run's record. Preflight
+	// (-gpstest) stays console-only.
+	if !*gpsTest {
+		logPath := filepath.Join(*outDir, fmt.Sprintf("scan_%s_log.txt", timestamp))
+		if logFile, err := os.Create(logPath); err != nil {
+			log.Printf("warning: cannot create run log %s: %v", logPath, err)
+		} else {
+			defer logFile.Close()
+			consoleOut = io.MultiWriter(os.Stderr, logFile)
+			log.SetOutput(consoleOut)
+		}
+	}
 
 	// GPS first: a typo'd COM port or wrong baud should fail before radios
 	// spin up.
@@ -418,8 +485,6 @@ func main() {
 
 	log.Printf("found %d dongle(s)", found)
 
-	timestamp := time.Now().Format("20060102_150405")
-
 	gainArgs := func() []string {
 		if !gainSet {
 			return nil
@@ -465,7 +530,11 @@ func main() {
 
 		plan := freqPlan(*mode, found)
 		for device := 0; device < found; device++ {
-			mapper := &surveyMapper{radio: device, gps: gps, sink: sink}
+			displayFreq := uint64(plan[device])
+			if displayFreq == 0 {
+				displayFreq = 912380000
+			}
+			mapper := &surveyMapper{radio: device, freqHz: displayFreq, gps: gps, sink: sink}
 			args := []string{"-msgtype", "r900"}
 			args = append(args, freqArgs(plan[device])...)
 			args = append(args, gainArgs()...)
@@ -545,6 +614,10 @@ func main() {
 			sink.Close()
 		}
 	}()
+
+	// Record the run's exact configuration alongside the data, so results
+	// are reproducible and RSSI values can be interpreted later.
+	writeRunInfo(filepath.Join(*outDir, fmt.Sprintf("scan_%s_info.txt", timestamp)), instances, gainSet)
 
 	var wg sync.WaitGroup
 	for _, inst := range instances {

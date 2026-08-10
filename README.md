@@ -141,11 +141,18 @@ rtlamrscan -gps COM13 -gpstest
 ```
 
 which reports the detected baud, the talker ID, and live fix status (expect
-no fix indoors — the antenna needs sky view). Output of a survey run is a
-single merged `survey_<timestamp>.csv`:
+no fix indoors — the antenna needs sky view). A survey run writes three
+files sharing one timestamp: the merged data CSV, a `scan_*_info.txt`
+recording the exact configuration (command line, per-dongle frequencies,
+fixed gain — needed to interpret RSSI later), and a `scan_*_log.txt` with
+the full run log (GPS fix acquired/lost, radio restarts), so gaps in the
+data are explainable afterward. The CSV's first fourteen columns are the
+downstream target shape; the remaining decoder fields and extra GPS detail
+(altitude, ground speed, course, fix age — from GGA+RMC) are appended after:
 
 ```
-Time,Radio,Lat,Lon,FixQuality,NumSats,HDOP,RSSI,SNR,ID,BackFlow,Consumption,Leak,LeakNow
+Time,Radio,Lat,Lon,FixQuality,NumSats,HDOP,RSSI,SNR,ID,BackFlow,Consumption,Leak,LeakNow,
+FreqHz,Unkn1,NoUse,Unkn3,AltitudeM,SpeedKmh,Course,GPSAgeSec
 ```
 
 For the drive itself: use the same antenna type on every radio (identical

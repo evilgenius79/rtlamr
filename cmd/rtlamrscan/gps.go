@@ -24,6 +24,7 @@ type gpsFix struct {
 	Quality  int
 	NumSats  int
 	HDOP     float64
+	AltM     float64
 	when     time.Time
 }
 
@@ -35,6 +36,10 @@ type gpsReader struct {
 	valid  bool
 	talker string // e.g. "GN", "GP"; first talker seen on a GGA sentence
 	hadFix bool   // whether a fix was ever acquired (for log messages)
+
+	// Ground speed and course from RMC sentences.
+	speedKmh, course float64
+	motionWhen       time.Time
 }
 
 // current returns the latest fix, or ok=false when there is no valid fix or
@@ -57,6 +62,9 @@ type gpsStatus struct {
 	Quality    int     `json:"quality"`
 	NumSats    int     `json:"numSats"`
 	HDOP       float64 `json:"hdop"`
+	AltM       float64 `json:"altM"`
+	SpeedKmh   float64 `json:"speedKmh"`
+	Course     float64 `json:"course"`
 	AgeSec     float64 `json:"ageSec"`
 	Talker     string  `json:"talker"`
 }
@@ -72,7 +80,11 @@ func (g *gpsReader) statusSnapshot(maxAge time.Duration) gpsStatus {
 			st.HasFix = true
 			st.Lat, st.Lon = g.fix.Lat, g.fix.Lon
 			st.Quality, st.NumSats, st.HDOP = g.fix.Quality, g.fix.NumSats, g.fix.HDOP
+			st.AltM = g.fix.AltM
 			st.AgeSec = age.Seconds()
+			if time.Since(g.motionWhen) <= maxAge {
+				st.SpeedKmh, st.Course = g.speedKmh, g.course
+			}
 		}
 	}
 	return st
@@ -191,6 +203,12 @@ func startGPS(ctx context.Context, portName string, forcedBaud int) (*gpsReader,
 func (g *gpsReader) handleSentence(s string) {
 	fix, valid, ok := parseGGA(s)
 	if !ok {
+		if speedKmh, course, rmcValid, rmcOK := parseRMC(s); rmcOK && rmcValid {
+			g.mu.Lock()
+			g.speedKmh, g.course = speedKmh, course
+			g.motionWhen = time.Now()
+			g.mu.Unlock()
+		}
 		return
 	}
 	fix.when = time.Now()
@@ -289,7 +307,36 @@ func parseGGA(s string) (fix gpsFix, valid, ok bool) {
 	fix.Quality = quality
 	fix.NumSats, _ = strconv.Atoi(fields[7])
 	fix.HDOP, _ = strconv.ParseFloat(fields[8], 64)
+	if len(fields) > 9 {
+		fix.AltM, _ = strconv.ParseFloat(fields[9], 64)
+	}
 	return fix, true, true
+}
+
+// parseRMC parses an RMC sentence from any talker, returning ground speed
+// (km/h) and course over ground (degrees true). ok reports whether the
+// sentence was a well-formed RMC; valid reports whether its data is usable
+// (status "A").
+func parseRMC(s string) (speedKmh, course float64, valid, ok bool) {
+	payload, ck := nmeaChecksumOK(s)
+	if !ck {
+		return 0, 0, false, false
+	}
+
+	fields := strings.Split(payload, ",")
+	if len(fields) < 9 || len(fields[0]) != 5 || fields[0][2:] != "RMC" {
+		return 0, 0, false, false
+	}
+
+	// Field layout: 0 talker, 1 utc, 2 status, 3 lat, 4 N/S, 5 lon, 6 E/W,
+	// 7 speed over ground in knots, 8 course over ground in degrees.
+	if fields[2] != "A" {
+		return 0, 0, false, true
+	}
+
+	knots, _ := strconv.ParseFloat(fields[7], 64)
+	course, _ = strconv.ParseFloat(fields[8], 64)
+	return knots * 1.852, course, true, true
 }
 
 // parseNMEACoord converts NMEA ddmm.mmmm / dddmm.mmmm plus hemisphere into
