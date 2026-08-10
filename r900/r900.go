@@ -19,6 +19,7 @@ package r900
 import (
 	"bytes"
 	"fmt"
+	"math"
 	"strconv"
 	"sync"
 
@@ -29,6 +30,14 @@ import (
 const (
 	PayloadSymbols = 42
 )
+
+// The three base chip patterns; quantized values 0-2 are their inversions,
+// 3-5 the patterns themselves.
+var chipPatterns = [3][4]byte{
+	{1, 1, 0, 0},
+	{1, 0, 1, 0},
+	{1, 0, 0, 1},
+}
 
 func init() {
 	protocol.RegisterParser("r900", NewParser)
@@ -242,8 +251,46 @@ func (p *Parser) Parse(pkts []protocol.Data, msgCh chan protocol.Message, wg *sy
 		leak, _ := strconv.ParseUint(bits[74:78], 2, 4)
 		leaknow, _ := strconv.ParseUint(bits[78:80], 2, 2)
 
+		// Estimate signal strength and SNR from the payload chips. Every
+		// symbol carries exactly two carrier-on and two carrier-off chips,
+		// and the quantized decisions say which are which, so the mean power
+		// of the on-chips is the received signal power and the off-chips
+		// give the noise floor. The cumulative sum computed by the matched
+		// filter makes each chip's energy a single subtraction.
+		var sigSum, noiseSum float32
+		for k, d := range digits {
+			symStart := payloadIdx + k*4*chipLength
+			pattern := chipPatterns[d%3]
+			for c := 0; c < 4; c++ {
+				chip := p.csum[symStart+(c+1)*chipLength] - p.csum[symStart+c*chipLength]
+				if (pattern[c] == 1) == (d >= 3) {
+					sigSum += chip
+				} else {
+					noiseSum += chip
+				}
+			}
+		}
+
+		halfChips := float64(len(digits) * 2 * chipLength)
+		sigPower := float64(sigSum) / halfChips
+		noisePower := float64(noiseSum) / halfChips
+
+		// Uncalibrated dB relative to the dongle's full scale: comparable
+		// between receptions on identical hardware at identical gain.
+		rssi, snr := -99.0, 99.0
+		if sigPower > 0 {
+			rssi = 10 * math.Log10(sigPower)
+			if noisePower > 0 {
+				snr = 10 * math.Log10(sigPower/noisePower)
+			}
+		} else {
+			snr = -99.0
+		}
+
 		var r900 R900
 
+		r900.RSSI = float32(rssi)
+		r900.SNR = float32(snr)
 		r900.ID = uint32(id)
 		r900.Unkn1 = uint8(unkn1)
 		r900.NoUse = uint8(nouse)
@@ -269,7 +316,14 @@ type R900 struct {
 	Unkn3       uint8  `xml:",attr"` // 2 bits
 	Leak        uint8  `xml:",attr"` // 4 bits, day bins of leak
 	LeakNow     uint8  `xml:",attr"` // 2 bits, leak past 24h hi/lo
-	checksum    [5]byte
+
+	// Received signal strength and signal-to-noise ratio of the burst, in
+	// uncalibrated dB relative to receiver full scale. Comparable between
+	// receptions on the same hardware at the same fixed gain.
+	RSSI float32 `xml:",attr"`
+	SNR  float32 `xml:",attr"`
+
+	checksum [5]byte
 }
 
 func (r900 R900) MsgType() string {
@@ -289,7 +343,7 @@ func (r900 R900) Checksum() []byte {
 }
 
 func (r900 R900) String() string {
-	return fmt.Sprintf("{ID:%10d Unkn1:0x%02X NoUse:%2d BackFlow:%1d Consumption:%8d Unkn3:0x%02X Leak:%2d LeakNow:%1d}",
+	return fmt.Sprintf("{ID:%10d Unkn1:0x%02X NoUse:%2d BackFlow:%1d Consumption:%8d Unkn3:0x%02X Leak:%2d LeakNow:%1d RSSI:%.1f SNR:%.1f}",
 		r900.ID,
 		r900.Unkn1,
 		r900.NoUse,
@@ -298,12 +352,14 @@ func (r900 R900) String() string {
 		r900.Unkn3,
 		r900.Leak,
 		r900.LeakNow,
+		r900.RSSI,
+		r900.SNR,
 	)
 }
 
 // Headers returns column names matching Record.
 func (r900 R900) Headers() []string {
-	return []string{"ID", "Unkn1", "NoUse", "BackFlow", "Consumption", "Unkn3", "Leak", "LeakNow"}
+	return []string{"ID", "Unkn1", "NoUse", "BackFlow", "Consumption", "Unkn3", "Leak", "LeakNow", "RSSI", "SNR"}
 }
 
 func (r900 R900) Record() (r []string) {
@@ -315,6 +371,8 @@ func (r900 R900) Record() (r []string) {
 	r = append(r, strconv.FormatUint(uint64(r900.Unkn3), 10))
 	r = append(r, strconv.FormatUint(uint64(r900.Leak), 10))
 	r = append(r, strconv.FormatUint(uint64(r900.LeakNow), 10))
+	r = append(r, strconv.FormatFloat(float64(r900.RSSI), 'f', 1, 32))
+	r = append(r, strconv.FormatFloat(float64(r900.SNR), 'f', 1, 32))
 
 	return
 }

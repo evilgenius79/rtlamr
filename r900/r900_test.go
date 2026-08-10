@@ -102,17 +102,10 @@ func buildSymbols(t *testing.T, f *gf.Field, want R900) []byte {
 	return append(symbols, encodeParity(t, f, symbols)...)
 }
 
-// chip patterns indexed by base symbol: 1100, 1010, 1001
-var basePatterns = [3][4]byte{
-	{1, 1, 0, 0},
-	{1, 0, 1, 0},
-	{1, 0, 0, 1},
-}
-
 // writeWaveform renders quantization digits as OOK chip waveforms into signal.
 func writeWaveform(signal []float32, offset, chipLength int, digits []byte) {
 	for k, d := range digits {
-		pattern := basePatterns[d%3]
+		pattern := chipPatterns[d%3]
 		high := float32(0)
 		if d >= 3 {
 			high = 1
@@ -200,7 +193,17 @@ func TestParseSyntheticMessage(t *testing.T) {
 		t.Fatalf("expected R900 message, got %T", msgs[0])
 	}
 
+	// The synthetic waveform has carrier chips at exactly 1.0 power and
+	// noise chips at exactly 0: RSSI must be 0dB and SNR must hit the cap.
+	if got.RSSI != 0 {
+		t.Fatalf("expected RSSI 0dB for full-scale synthetic signal, got %.2f", got.RSSI)
+	}
+	if got.SNR != 99 {
+		t.Fatalf("expected capped SNR 99dB for noiseless synthetic signal, got %.2f", got.SNR)
+	}
+
 	got.checksum = [5]byte{}
+	got.RSSI, got.SNR = 0, 0
 	if got != want {
 		t.Fatalf("decoded message mismatch:\ngot:  %s\nwant: %s", got, want)
 	}

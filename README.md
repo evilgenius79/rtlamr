@@ -99,32 +99,62 @@ Note that R900 transmitters hop across many channels and rtlamr only listens
 to part of that band, so leave it running for a while — expect to catch each
 meter intermittently rather than on every transmission.
 
+### R900 Signal Strength (RSSI/SNR)
+
+Every decoded R900 message includes per-burst `RSSI` and `SNR` columns,
+measured from the burst's own carrier-on vs carrier-off chips. Values are in
+uncalibrated dB relative to receiver full scale: they are comparable between
+receptions on the same hardware at the same **fixed** tuner gain (set
+`-tunergain`; automatic gain makes RSSI meaningless), and between dongles of
+the same model with identical antennas at the same gain.
+
 ### One-click Scanning: rtlamrscan
 
 `cmd/rtlamrscan` builds a launcher that runs a whole scan from a single
-program: it auto-detects up to two dongles, starts an `rtl_tcp` instance for
-each, runs a decoder against each, and writes timestamped CSV files to the
-current directory. Closing the window or pressing Ctrl+C stops everything,
-including the `rtl_tcp` child processes.
-
-By default it scans water meters only. R900 transmitters hop across
-902-928MHz while each dongle captures only a ~2.4MHz slice, so with two
-dongles the launcher tunes them to adjacent slices — one centered at
-911.2MHz, one at 913.56MHz, covering roughly 910-914.7MHz with no gap —
-and merges both decoders into a single `r900_<timestamp>.csv`, roughly
-doubling the number of transmissions caught. With one dongle it stays on
-the default 912.38MHz center.
+program: it auto-detects up to three dongles, starts an `rtl_tcp` instance
+for each, runs a decoder against each, and writes timestamped CSV files to
+the current directory. Closing the window or pressing Ctrl+C stops
+everything, including the `rtl_tcp` child processes.
 
 ```bash
 go build ./cmd/rtlamrscan
 ```
 
 Put the resulting binary in the same folder as `rtlamr` and `rtl_tcp` (on
-Windows: `rtlamr.exe` and `rtl_tcp.exe` with its DLLs) and run it. Useful
-flags: `-mode mixed` to instead decode electric/gas (SCM/SCM+/IDM) on the
-second dongle, `-duration 1h` to stop after a fixed time, `-dongles 1` to
-skip auto-detection, `-freqlow`/`-freqhigh` to tune the two water slices,
-and `-outdir` to choose where CSVs are written.
+Windows: `rtlamr.exe` and `rtl_tcp.exe` with its DLLs) and run it.
+
+**survey mode (default)** is a mobile drive-by survey for locating meters:
+up to three dongles all decode R900 on centers spread across the 902-928MHz
+hop band (906.0/912.38/918.5MHz for three; a tiled pair around 912.38MHz for
+two), every burst is kept as its own row (no dedup — each burst is a
+position+signal sample), all radios run at the same fixed tuner gain
+(`-gain`, default 40dB) so RSSI is comparable, and rows are appended to disk
+as they decode. With `-gps COM4` (`-gpsbaud 4800` if needed) a USB NMEA GPS
+puck stamps every row with the position at decode time; without a fix the
+position columns are blank, never 0,0. Output is a single merged
+`survey_<timestamp>.csv`:
+
+```
+Time,Radio,Lat,Lon,FixQuality,NumSats,HDOP,RSSI,SNR,ID,BackFlow,Consumption,Leak,LeakNow
+```
+
+For the drive itself: use the same antenna type on every radio (identical
+mag-mount 915MHz omnis), fix each dongle's USB serial once so they stay
+individually addressable (`rtl_eeprom -d 0 -s 1` etc., one plugged in at a
+time — many ship as `00000001`), drive slowly, and cover streets from both
+directions when possible. The `Radio` column records which dongle heard each
+burst.
+
+**water mode** (`-mode water`) is the stationary leak scan: all dongles
+decode R900 on adjacent ~2.4MHz slices around 912.38MHz with duplicate
+readings suppressed, merged into one `r900_<timestamp>.csv`.
+
+**mixed mode** (`-mode mixed`) decodes R900 on dongle 1 and electric/gas
+(SCM/SCM+/IDM) on dongle 2.
+
+Other flags: `-duration 1h` to stop after a fixed time, `-dongles N` to skip
+auto-detection, `-freqs 906000000,912380000,918500000` to override the
+per-dongle centers, and `-outdir` to choose where CSVs are written.
 
 ### Low-power Devices and Multiple Dongles
 
